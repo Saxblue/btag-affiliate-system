@@ -10,8 +10,6 @@ import re
 import socket
 import urllib3
 import sys
-import threading
-import time
 
 # Uyarıları kapat
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -62,16 +60,6 @@ alternative_names = {
     'izin verildi': 'İzin Verildi'
 }
 
-# Yeni çekim talepleri için session state başlatma
-if 'last_request_ids' not in st.session_state:
-    st.session_state.last_request_ids = set()
-if 'auto_refresh_enabled' not in st.session_state:
-    st.session_state.auto_refresh_enabled = False
-if 'new_requests_count' not in st.session_state:
-    st.session_state.new_requests_count = 0
-if 'last_check_time' not in st.session_state:
-    st.session_state.last_check_time = None
-
 # Özel CSS
 st.markdown("""
 <style>
@@ -85,19 +73,6 @@ st.markdown("""
     .stTextInput>label {font-weight:bold;}
     .stAlert {border-radius:10px;}
     .stDataFrame {border-radius:10px;}
-    .new-request-alert {
-        background-color: #e8f5e8;
-        border: 2px solid #4CAF50;
-        border-radius: 10px;
-        padding: 15px;
-        margin: 10px 0;
-        animation: pulse 2s infinite;
-    }
-    @keyframes pulse {
-        0% { background-color: #e8f5e8; }
-        50% { background-color: #f0fff0; }
-        100% { background-color: #e8f5e8; }
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -159,8 +134,7 @@ def load_config():
     
     default_config = {
         "token": "affe433a578d139ed6aa4e3c02bbdd7e341719493c31e3c39a8ee60711aaeb75",
-        "api_url": "https://backofficewebadmin.betconstruct.com/api/tr/Client/GetClientWithdrawalRequestsWithTotals",
-        "auto_refresh_interval": 30  # 30 saniye
+        "api_url": "https://backofficewebadmin.betconstruct.com/api/tr/Client/GetClientWithdrawalRequestsWithTotals"
     }
 
     try:
@@ -211,225 +185,7 @@ def update_global_config():
 # İlk yükleme
 update_global_config()
 
-# Yeni çekim taleplerini kontrol et (arka plan)
-def check_new_requests_background(token, interval_seconds=30):
-    """Arka planda yeni çekim taleplerini kontrol et"""
-    if not token:
-        return
-        
-    try:
-        # Son 1 saatlik verileri kontrol et
-        end_date = datetime.now()
-        start_date = end_date - timedelta(hours=1)
-        
-        result = fetch_withdrawal_requests(token, start_date.date(), end_date.date(), debug_mode=False)
-        
-        if not result.get('error', False) and 'Data' in result:
-            data = result['Data']
-            if 'ClientRequests' in data and len(data['ClientRequests']) > 0:
-                current_request_ids = set()
-                
-                # Yeni talep ID'lerini topla
-                for request in data['ClientRequests']:
-                    if 'Id' in request:
-                        current_request_ids.add(str(request['Id']))
-                
-                # İlk çalıştırmada mevcut ID'leri kaydet
-                if not st.session_state.last_request_ids:
-                    st.session_state.last_request_ids = current_request_ids
-                    return 0
-                
-                # Yeni ID'leri bul
-                new_ids = current_request_ids - st.session_state.last_request_ids
-                st.session_state.last_request_ids = current_request_ids
-                
-                if len(new_ids) > 0:
-                    st.session_state.new_requests_count = len(new_ids)
-                    st.session_state.last_check_time = datetime.now()
-                    return len(new_ids)
-                    
-        return 0
-        
-    except Exception as e:
-        print(f"Arka plan kontrolü hatası: {e}")
-        return 0
-
 # API'den veri çekme fonksiyonu
-def get_client_bonuses(client_id, token):
-    """Client'ın bonus bilgilerini getir"""
-    url = "https://backofficewebadmin.betconstruct.com/api/tr/Client/GetClientBonuses"
-    headers = {
-        "Authentication": token.strip(),
-        "Accept": "application/json, text/plain, */*",
-        "Content-Type": "application/json;charset=UTF-8",
-    }
-    
-    payload = {
-        "ClientId": client_id,
-        "StartDateLocal": None,
-        "EndDateLocal": None,
-        "BonusType": None,
-        "AcceptanceType": None,
-        "PartnerBonusId": "",
-        "ClientBonusId": ""
-    }
-    
-    try:
-        response = requests.post(url, headers=headers, json=payload, timeout=20, verify=False)
-        if response.status_code == 200:
-            data = response.json()
-            if data.get('Data') and not data.get("HasError"):
-                # Tarihe göre sırala, en yeni en üstte
-                bonuses = sorted(data['Data'], 
-                               key=lambda x: datetime.strptime(x['CreatedLocal'].split('.')[0], 
-                                                           '%Y-%m-%dT%H:%M:%S') if x.get('CreatedLocal') else datetime.min, 
-                               reverse=True)
-                return bonuses
-        return []
-    except Exception as e:
-        return []
-
-def get_client_transactions(client_id, token, days_back=30):
-    """Client'ın işlem geçmişini getir"""
-    url = "https://backofficewebadmin.betconstruct.com/api/tr/Client/GetClientTransactionsByAccount"
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=days_back)
-    
-    headers = {
-        "Authentication": token.strip(),
-        "Accept": "application/json, text/plain, */*",
-        "Content-Type": "application/json;charset=UTF-8",
-    }
-    
-    # Client ID'yi int'e çevir
-    try:
-        client_id_param = int(client_id)
-    except ValueError:
-        client_id_param = client_id
-    
-    payload = {
-        "StartTimeLocal": start_date.strftime("%d-%m-%y"),
-        "EndTimeLocal": end_date.strftime("%d-%m-%y"),
-        "ClientId": client_id_param,
-        "CurrencyId": "TRY",
-        "BalanceTypeId": "5211",
-        "DocumentTypeIds": [],
-        "GameId": None
-    }
-    
-    try:
-        response = requests.post(url, headers=headers, json=payload, timeout=20, verify=False)
-        if response.status_code == 200:
-            data = response.json()
-            if not data.get("HasError") and "Data" in data:
-                if isinstance(data["Data"], dict):
-                    if "Objects" in data["Data"]:
-                        return data["Data"]["Objects"]
-                    elif "Items" in data["Data"]:
-                        return data["Data"]["Items"]
-                elif isinstance(data["Data"], list):
-                    return data["Data"]
-        return []
-    except Exception as e:
-        return []
-
-def analyze_client_transactions(client_id, token):
-    """Client'ın işlemlerini analiz et ve çevrim hesapla"""
-    try:
-        # İşlem geçmişini al (30 gün)
-        transactions = get_client_transactions(client_id, token, 30)
-        
-        if not transactions:
-            # 90 gün dene
-            transactions = get_client_transactions(client_id, token, 90)
-            
-        if not transactions:
-            return None
-        
-        # DataFrame'e çevir
-        df = pd.DataFrame(transactions)
-        
-        # Tarih sütununu düzenle
-        if 'CreatedLocal' in df.columns:
-            df['Date'] = pd.to_datetime(df['CreatedLocal'].str.split('.').str[0], errors='coerce')
-        else:
-            return None
-        
-        # Yatırımları bul
-        deposits = df[df['DocumentTypeName'] == 'Yatırım'].copy()
-        
-        if deposits.empty:
-            return None
-        
-        # En son yatırımı bul
-        last_deposit = deposits.sort_values('Date', ascending=False).iloc[0]
-        deposit_date = last_deposit['Date']
-        
-        # Kayıp bonusunu kontrol et
-        loss_bonus = df[df['DocumentTypeId'] == 309].sort_values('Date', ascending=False)
-        
-        # Temel işlemi belirle (yatırım veya kayıp bonusu)
-        base_transaction = None
-        base_type = None
-        base_date = None
-        base_amount = None
-        
-        if not loss_bonus.empty:
-            # Yatırımdan sonra kayıp bonusu var mı?
-            recent_bonus = loss_bonus[loss_bonus['Date'] >= deposit_date]
-            if not recent_bonus.empty:
-                # En son kayıp bonusunu kullan
-                base_transaction = recent_bonus.iloc[0]
-                base_type = 'Kayıp Bonusu'
-                base_date = base_transaction['Date']
-                base_amount = float(base_transaction['Amount'])
-            else:
-                # Yatırımı kullan
-                base_transaction = last_deposit
-                base_type = 'Yatırım'
-                base_date = deposit_date
-                base_amount = float(last_deposit['Amount'])
-        else:
-            # Sadece yatırım var
-            base_transaction = last_deposit
-            base_type = 'Yatırım'
-            base_date = deposit_date
-            base_amount = float(last_deposit['Amount'])
-        
-        # Temel işlemden sonraki işlemleri filtrele
-        df_after_base = df[df['Date'] >= base_date].copy()
-        
-        # Bahis ve kazançları hesapla
-        df_bets = df_after_base[df_after_base['DocumentTypeName'] == 'Bahis']
-        df_wins = df_after_base[df_after_base['DocumentTypeName'] == 'Kazanç Artar']
-        
-        total_bet = df_bets['Amount'].sum()
-        total_win = df_wins['Amount'].sum()
-        
-        return {
-            'base_info': {
-                'type': base_type,
-                'amount': base_amount,
-                'date': base_date,
-                'payment_method': base_transaction.get('PaymentSystemName', 'Bilinmiyor')
-            },
-            'last_deposit': {
-                'date': deposit_date,
-                'amount': float(last_deposit['Amount']),
-                'payment_method': last_deposit.get('PaymentSystemName', 'Bilinmiyor')
-            },
-            'total_bet': total_bet,
-            'total_win': total_win,
-            'net_profit': total_win - total_bet,
-            'turnover_ratio': total_bet / base_amount if base_amount > 0 else 0,
-            'bets': df_bets[['Date', 'Game', 'Amount']].to_dict('records') if not df_bets.empty else [],
-            'wins': df_wins[['Date', 'Game', 'Amount']].to_dict('records') if not df_wins.empty else [],
-            'loss_bonus': [{'Date': base_date, 'Amount': base_amount}] if base_type == 'Kayıp Bonusu' else None
-        }
-        
-    except Exception as e:
-        return None
-
 def fetch_withdrawal_requests(token, start_date, end_date, debug_mode=False):
     # URL'deki fazladan boşlukları kaldır
     url = "https://backofficewebadmin.betconstruct.com/api/tr/Client/GetClientWithdrawalRequestsWithTotals"
@@ -563,55 +319,9 @@ def reject_withdrawals(*args, **kwargs):
 def main():
     st.markdown("<div class='main-header'>💰 Çekim Talepleri Yönetim Paneli</div>", unsafe_allow_html=True)
     
-    # Yeni çekim talepleri bildirimi (üstte)
-    if st.session_state.new_requests_count > 0:
-        st.markdown(f"""
-        <div class="new-request-alert">
-            🔔 <strong>{st.session_state.new_requests_count} YENİ ÇEKİM TALEBİ GELDİ!</strong><br>
-            ⏰ Tespit zamanı: {st.session_state.last_check_time.strftime('%H:%M:%S') if st.session_state.last_check_time else 'Bilinmiyor'}
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # Bildirimi gösterdikten sonra sıfırla
-        col1, col2 = st.columns([1, 4])
-        with col1:
-            if st.button("✅ Bildirimi Temizle"):
-                st.session_state.new_requests_count = 0
-                st.rerun()
-    
     # Yan çubuk - Ayarlar
     with st.sidebar:
         st.header("⚙️ Ayarlar")
-        
-        # Otomatik yenileme ayarları
-        st.subheader("🔄 Otomatik Yenileme")
-        auto_refresh = st.checkbox("Otomatik yenileme aktif", value=st.session_state.auto_refresh_enabled)
-        
-        refresh_interval = st.selectbox(
-            "Yenileme aralığı (saniye)",
-            options=[15, 30, 60, 120],
-            index=1,  # Default 30 saniye
-            help="Yeni çekim taleplerini ne sıklıkla kontrol etmek istiyorsunuz?"
-        )
-        
-        if auto_refresh != st.session_state.auto_refresh_enabled:
-            st.session_state.auto_refresh_enabled = auto_refresh
-            config["auto_refresh_interval"] = refresh_interval
-            save_config(config)
-        
-        # Manuel kontrol butonları
-        col_manual1, col_manual2 = st.columns(2)
-        with col_manual1:
-            if st.button("🔍 Yeni Talep Kontrol Et"):
-                new_count = check_new_requests_background(config.get("token", ""))
-                if new_count > 0:
-                    st.success(f"🔔 {new_count} yeni talep bulundu!")
-                else:
-                    st.info("ℹ️ Yeni talep bulunamadı.")
-        
-        with col_manual2:
-            if st.button("🔄 Sayfayı Yenile"):
-                st.rerun()
         
         # Token yönetimi
         st.subheader("API Kimlik Doğrulama")
@@ -666,15 +376,8 @@ def main():
         st.warning("Lütfen yan menüden API token'ınızı girin ve kaydedin.")
         return
     
-    # Verileri çek butonu ve otomatik yükleme
-    col_fetch1, col_fetch2 = st.columns([3, 1])
-    with col_fetch1:
-        fetch_data = st.button("🔍 Verileri Çek", use_container_width=True)
-    with col_fetch2:
-        auto_load = st.checkbox("Otomatik yükle", value=True, help="Sayfa açıldığında otomatik olarak verileri yükle")
-    
-    # Otomatik yükleme veya buton ile yükleme
-    if fetch_data or (auto_load and 'withdrawal_data' not in st.session_state):
+    # Verileri çek butonu
+    if st.button("🔍 Verileri Çek", use_container_width=True):
         with st.spinner("Veriler çekiliyor..."):
             result = fetch_withdrawal_requests(config.get("token", ""), start_date, end_date, debug_mode)
             
@@ -695,25 +398,8 @@ def main():
                     """)
             else:
                 st.session_state.withdrawal_data = result
-                st.success(f"✅ Veriler başarıyla yüklendi! Son güncelleme: {datetime.now().strftime('%H:%M:%S')}")
     
-    # Otomatik yenileme sistemi (JavaScript tabanlı)
-    if st.session_state.auto_refresh_enabled:
-        # Auto-refresh için JavaScript timer
-        components.html(f"""
-        <script>
-        setTimeout(function(){{
-            window.parent.location.reload();
-        }}, {refresh_interval * 1000});
-        </script>
-        """, height=0)
-        
-        # Arka planda yeni talepleri kontrol et
-        new_count = check_new_requests_background(config.get("token", ""))
-        if new_count > 0:
-            st.session_state.new_requests_count += new_count
-    
-    # Verileri göster (mevcut kodun geri kalanı...)
+    # Verileri göster
     if 'withdrawal_data' in st.session_state and 'Data' in st.session_state.withdrawal_data:
         data = st.session_state.withdrawal_data['Data']
         
@@ -742,22 +428,21 @@ def main():
                 for item in data['ClientRequests']
             ]
             # 1) Birden fazla denemeyle parse et (ISO veya dd.MM.yyyy destekle)
-            parsed_idx = pd.to_datetime(raw_dates, errors='coerce')
+            parsed_idx = pd.to_datetime(raw_dates, errors='coerce', infer_datetime_format=True)
             # Seriye çevir ve df ile hizala
             parsed = pd.Series(parsed_idx, index=df.index)
             if parsed.isna().any():
-                alt_idx = pd.to_datetime(raw_dates, errors='coerce', dayfirst=True)
+                alt_idx = pd.to_datetime(raw_dates, errors='coerce', dayfirst=True, infer_datetime_format=True)
                 alt = pd.Series(alt_idx, index=df.index)
                 parsed = parsed.fillna(alt)
             # 2) Zaman dilimi varsa naive'a çevir (UTC'ye çevirip tz bilgisini kaldır)
             try:
-                if hasattr(parsed, 'dt') and parsed.dt.tz is not None:
+                if parsed.dt.tz is not None:
                     parsed = parsed.dt.tz_convert(None)
             except Exception:
                 # Eğer tz_convert başarısız olursa tz_localize(None) dene
                 try:
-                    if hasattr(parsed, 'dt'):
-                        parsed = parsed.dt.tz_localize(None)
+                    parsed = parsed.dt.tz_localize(None)
                 except Exception:
                     pass
 
@@ -785,16 +470,13 @@ def main():
             df = df.drop(['State', 'StateName'], axis=1, errors='ignore')
             
             # Tarihe göre sırala (en yeni en üstte)
-            df['_sort_date'] = pd.to_datetime(df['Tarih'], errors='coerce', dayfirst=True)
+            df['_sort_date'] = pd.to_datetime(df['Tarih'], errors='coerce')
             
             # Yeni işlemleri öne almak için öncelik sütunu oluştur
-            if 'Durum' in df.columns:
-                df['_priority'] = df['Durum'].apply(lambda x: 0 if 'Yeni' in str(x) else 1)
-                
-                # Önce duruma göre (Yeni olanlar üstte), sonra tarihe göre sırala
-                df = df.sort_values(['_priority', '_sort_date'], ascending=[True, False])
-            else:
-                df = df.sort_values('_sort_date', ascending=False)
+            df['_priority'] = df['Durum'].apply(lambda x: 0 if 'Yeni' in str(x) else 1)
+            
+            # Önce duruma göre (Yeni olanlar üstte), sonra tarihe göre sırala
+            df = df.sort_values(['_priority', '_sort_date'], ascending=[True, False])
             
             # Geçici sütunları kaldır ve indeksi sıfırla
             df = df.drop(['_sort_date', '_priority', '_filter_date'], axis=1, errors='ignore').reset_index(drop=True)
@@ -842,12 +524,12 @@ def main():
             if not st.session_state.get('hide_withdrawals_table', False):
                 for idx in edited_df.index:
                     st.session_state.selected_rows[idx] = bool(edited_df.at[idx, 'Seç'])
-
-            st.info(f"📊 Toplam {len(df)} çekim talebi listelendi. Toplam tutar: {total_amount:,.2f} TL")
             
             # --- Tablo altı alan: Seçilen uygulamalar bu konteyner içinde gösterilir ---
             under_table_pl = st.container()
             
+            # --- Çevrim Hesaplama (KPI) Bölümü başlığı kaldırıldı (içerikler seçimle gösterilecek) ---
+
             # Seçili satırları bul
             selected_indices = [i for i, v in st.session_state.selected_rows.items() if v]
             selected_count = len(selected_indices)
@@ -875,7 +557,7 @@ def main():
                 if run_kpi:
                     kpi_url = "https://backofficewebadmin.betconstruct.com/api/tr/Client/GetClientKpi"
                     headers = {
-                        "Authentication": config.get("token", "").strip(),
+                        "Authentication": token.strip(),
                         "Accept": "application/json, text/plain, */*",
                     }
                     params = {"id": client_id}
@@ -898,275 +580,727 @@ def main():
                         else:
                             k = data.get("Data") or {}
                             apps = set(st.session_state.get('below_table_apps', []))
-                            
-                            # KPI Metrikleri
                             if "KPI Metrikleri" in apps:
-                                with under_table_pl:
-                                    st.subheader("📊 KPI Metrikleri")
-                                    m1, m2, m3, m4 = st.columns(4)
-                                    m1.metric("Toplam Spor Bahis", k.get("TotalSportBets", 0))
-                                    m2.metric("Spor Stake", f"{k.get('TotalSportStakes', 0):,.2f}")
-                                    m3.metric("Casino Stake", f"{k.get('TotalCasinoStakes', 0):,.2f}")
-                                    m4.metric("Kar/Zarar", f"{k.get('ProfitAndLose', 0):,.2f}")
+                                # Öne çıkan metrikler
+                                m1, m2, m3, m4 = st.columns(4)
+                                m1.metric("Toplam Spor Bahis", k.get("TotalSportBets"))
+                                m2.metric("Spor Stake", k.get("TotalSportStakes"))
+                                m3.metric("Casino Stake", k.get("TotalCasinoStakes"))
+                                m4.metric("Kar/Zarar", k.get("ProfitAndLose"))
 
-                            # Fraud Raporu
-                            if "Fraud Raporu" in apps:
+                                # Detay tablo
+                                detail_rows = [{
+                                    "ClientId": k.get("ClientId"),
+                                    "TotalSportStakes": k.get("TotalSportStakes"),
+                                    "TotalSportWinnings": k.get("TotalSportWinnings"),
+                                    "TotalCasinoStakes": k.get("TotalCasinoStakes"),
+                                    "TotalCasinoWinnings": k.get("TotalCasinoWinnings"),
+                                    "DepositAmount": k.get("DepositAmount"),
+                                    "WithdrawalAmount": k.get("WithdrawalAmount"),
+                                    "SportProfitness": k.get("SportProfitness"),
+                                    "CasinoProfitness": k.get("CasinoProfitness"),
+                                }]
                                 with under_table_pl:
-                                    st.subheader("🔎 Fraud Raporu")
-                                    
+                                    st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
+
+                    # --- Client Accounts (Bakiyeler) ---
+                    acc_url = "https://backofficewebadmin.betconstruct.com/api/tr/Client/GetClientAccounts"
+                    acc_payload = {"Id": client_id}
+                    try:
+                        acc_resp = requests.post(acc_url, headers=headers, json=acc_payload, timeout=20, verify=False)
+                        acc_data = acc_resp.json()
+                    except Exception as e:
+                        st.error(f"ClientAccounts isteği başarısız: {e}")
+                        acc_data = None
+
+                    if debug_kpi and acc_data is not None:
+                        with st.expander("ClientAccounts Ham Yanıt"):
+                            st.json(acc_data)
+
+                    apps = set(st.session_state.get('below_table_apps', []))
+                    if "Müşteri Bakiyeleri" in apps:
+                        if acc_data and not acc_data.get("HasError"):
+                            rows = acc_data.get("Data") or []
+                            if isinstance(rows, list) and rows:
+                                acc_df = pd.DataFrame(rows)
+                                with under_table_pl:
+                                    st.caption("Müşteri Hesap Bakiyeleri")
+                                    st.dataframe(acc_df, use_container_width=True, hide_index=True)
+                            else:
+                                st.info("Hesap bakiyesi verisi bulunamadı.")
+                        elif acc_data and acc_data.get("HasError"):
+                            st.error(acc_data.get("AlertMessage") or "ClientAccounts isteği hata döndü.")
+
+                    # --- Client Bonuses ---
+                    bonus_url = "https://backofficewebadmin.betconstruct.com/api/tr/Client/GetClientBonuses"
+                    bonus_payload = {
+                        "ClientId": client_id,
+                        "StartDateLocal": None,
+                        "EndDateLocal": None,
+                        "BonusType": None,
+                        "AcceptanceType": None,
+                        "ClientBonusId": "",
+                        "PartnerBonusId": "",
+                        "PartnerExternalBonusId": "",
+                    }
+                    try:
+                        bonus_resp = requests.post(bonus_url, headers=headers, json=bonus_payload, timeout=30, verify=False)
+                        bonus_data = bonus_resp.json()
+                    except Exception as e:
+                        st.error(f"ClientBonuses isteği başarısız: {e}")
+                        bonus_data = None
+
+                    if debug_kpi and bonus_data is not None:
+                        with st.expander("ClientBonuses Ham Yanıt"):
+                            st.json(bonus_data)
+
+                    apps = set(st.session_state.get('below_table_apps', []))
+                    if ("Müşteri Bonusları" in apps) and bonus_data and not bonus_data.get("HasError"):
+                        b_rows = bonus_data.get("Data") or []
+                        if isinstance(b_rows, list) and b_rows:
+                            b_df = pd.DataFrame(b_rows)
+                            # Önemli kolonları öne al
+                            preferred = [
+                                "Id", "Name", "Amount", "AcceptanceDateLocal", "ResultDateLocal",
+                                "BonusType", "ResultType", "WageredAmount", "ToWagerAmount", "PaidAmount"
+                            ]
+                            cols = [c for c in preferred if c in b_df.columns] + [c for c in b_df.columns if c not in preferred]
+                            b_df = b_df[cols]
+                            # En son alınan bonusu en üste getir
+                            try:
+                                # Öncelik: AcceptanceDateLocal, sonra ResultDateLocal, sonra Created/CreatedLocal
+                                date_candidates = []
+                                for c in ["AcceptanceDateLocal", "ResultDateLocal", "CreatedLocal", "Created"]:
+                                    if c in b_df.columns:
+                                        date_candidates.append(pd.to_datetime(b_df[c], errors='coerce', dayfirst=True, infer_datetime_format=True))
+                                if date_candidates:
+                                    acc_dt = date_candidates[0]
+                                    for extra in date_candidates[1:]:
+                                        acc_dt = acc_dt.fillna(extra)
+                                    b_df['_sort_dt'] = acc_dt
+                                    b_df = b_df.sort_values('_sort_dt', ascending=False)
+                            except Exception:
+                                pass
+
+                            with under_table_pl:
+                                st.caption("Müşteri Bonusları")
+                                # Son bonusu öne çıkar
+                                if not b_df.empty:
+                                    last_bonus = b_df.head(1).copy()
+                                    show_all = st.toggle("Tüm bonusları göster", value=False, key=f"show_all_bonuses_{client_id}")
+                                    st.markdown("**Son Alınan Bonus**")
+
+                                    # Alanları derle: ad, miktar, tarih, açıklama, ödenme durumu, oluşturan kişi
+                                    lb = last_bonus.iloc[0].to_dict()
+                                    name = lb.get("Name") or lb.get("BonusName") or "-"
+                                    amount = lb.get("Amount") if pd.notna(lb.get("Amount")) else None
+                                    # Tarih önceliği
+                                    date_val = None
+                                    for c in ["AcceptanceDateLocal", "ResultDateLocal", "CreatedLocal", "Created"]:
+                                        if c in last_bonus.columns:
+                                            try:
+                                                v = pd.to_datetime(lb.get(c), errors='coerce', dayfirst=True, infer_datetime_format=True)
+                                                if pd.notna(v):
+                                                    date_val = v
+                                                    break
+                                            except Exception:
+                                                pass
+                                    date_str = date_val.strftime('%d.%m.%Y %H:%M') if isinstance(date_val, pd.Timestamp) else (str(date_val) if date_val else "-")
+
+                                    desc = lb.get("Description") or lb.get("BonusDescription") or "-"
+
+                                    # Ödenme durumu: PaidAmount>0 ise Ödendi, değilse Ödenmedi (fallback ResultType)
+                                    paid_amount = lb.get("PaidAmount")
+                                    paid_status = None
                                     try:
-                                        name = df.at[sel_idx, 'Müşteri Adı'] if 'Müşteri Adı' in df.columns else "-"
-                                        username = df.at[sel_idx, 'Kullanıcı Adı'] if 'Kullanıcı Adı' in df.columns else "-"
-                                        req_amount = df.at[sel_idx, 'Miktar'] if 'Miktar' in df.columns else None
-                                        pay_method = df.at[sel_idx, 'Ödeme Yöntemi'] if 'Ödeme Yöntemi' in df.columns else "-"
+                                        paid_status = "Ödendi" if (pd.notna(paid_amount) and float(paid_amount) > 0) else None
                                     except Exception:
-                                        name, username, req_amount, pay_method = "-", "-", None, "-"
-
-                                    def fmt_tl(val):
-                                        try:
-                                            n = float(val)
-                                        except Exception:
-                                            return "-"
-                                        # 1,234,567.89 -> 1.234.567,89
-                                        s = f"{n:,.2f}"
-                                        s = s.replace(",", "_").replace(".", ",").replace("_", ".")
-                                        return f"{s} TL"
-
-                                    # Gelişmiş çevrim analizi al
-                                    analysis = analyze_client_transactions(client_id, config.get("token", ""))
-                                    
-                                    # Temel bilgiler
-                                    invest_amt = k.get("DepositAmount", 0)
-                                    total_dep_amt = k.get("DepositAmount", 0)
-                                    total_wd_amt = k.get("WithdrawalAmount", 0)
-                                    
-                                    # İşlem sayıları (KPI'dan)
-                                    total_dep_count = k.get("TotalDepositCount", 0) or 0
-                                    total_wd_count = k.get("TotalWithdrawalCount", 0) or 0
-                                    
-                                    # Bakiye bilgisi (KPI'dan)
-                                    balance = k.get("Balance", 0) or 0
-                                    
-                                    # Oyun türü ve devam durumu
-                                    oyun_turu = "-"
-                                    sport_stake = k.get("TotalSportStakes", 0)
-                                    casino_stake = k.get("TotalCasinoStakes", 0)
-                                    oyuna_devam = "Evet"  # Çekim talebi varsa devam ediyor sayılır
-                                    
-                                    if casino_stake and float(casino_stake) > 0:
-                                        if sport_stake and float(sport_stake) > 0:
-                                            oyun_turu = "Karma (Casino + Spor)"
+                                        paid_status = None
+                                    if not paid_status:
+                                        # ResultType üzerinden (bilinmiyorsa boş bırak)
+                                        rt = lb.get("ResultType")
+                                        if pd.notna(rt):
+                                            try:
+                                                rt_int = int(rt)
+                                                # Tahmini: 3=Won/Paid veya 2=Completed; sahaya göre güncellenebilir
+                                                paid_status = "Ödendi" if rt_int in (2,3) else "Ödenmedi"
+                                            except Exception:
+                                                paid_status = "Ödenmedi"
                                         else:
-                                            oyun_turu = "Casino"
-                                    elif sport_stake and float(sport_stake) > 0:
-                                        oyun_turu = "Spor"
-                                    
-                                    # Son bonus bilgisi
-                                    bonuses = get_client_bonuses(client_id, config.get("token", ""))
-                                    son_bonus_info = ""
-                                    
-                                    if bonuses:
-                                        latest_bonus = bonuses[0]
-                                        bonus_name = latest_bonus.get('Name', 'Bilinmiyor')
-                                        bonus_amount = latest_bonus.get('Amount', 0)
-                                        if bonus_amount and float(bonus_amount) > 0:
-                                            son_bonus_info = f"Son Bonus: {bonus_name} ({fmt_tl(bonus_amount)})"
-                                    
-                                    # Açıklama kısmı (çevrim analizinden)
-                                    aciklama = ""
-                                    if analysis and analysis.get('bets') and analysis.get('wins'):
-                                        base_info = analysis['base_info']
-                                        df_bets = pd.DataFrame(analysis['bets'])
-                                        df_wins = pd.DataFrame(analysis['wins'])
-                                        
-                                        if not df_bets.empty and not df_wins.empty:
-                                            # Oyun bazında kar hesaplama
-                                            game_bets = df_bets.groupby('Game')['Amount'].sum()
-                                            game_wins = df_wins.groupby('Game')['Amount'].sum()
-                                            
-                                            profitable_games = []
-                                            for game in game_bets.index:
-                                                bet_amount = game_bets[game]
-                                                win_amount = game_wins.get(game, 0)
-                                                net = win_amount - bet_amount
-                                                if net > 0:
-                                                    profitable_games.append((game, net))
-                                            
-                                            if profitable_games:
-                                                # En karlı oyunları listele
-                                                profitable_games.sort(key=lambda x: x[1], reverse=True)
-                                                top_games = profitable_games[:3]  # İlk 3 oyun
-                                                
-                                                games_text = ", ".join([game[0] for game in top_games])
-                                                total_profit = sum([game[1] for game in top_games])
-                                                
-                                                kaynak = base_info['type']
-                                                kaynak_miktar = base_info['amount']
-                                                aciklama = f"💰 {kaynak} ile ({fmt_tl(kaynak_miktar)}) {games_text} oyunlarından toplam {fmt_tl(total_profit)} net kar elde edilmiştir."
-                                    
-                                    # Son yatırım miktarı (analiz varsa)
-                                    if analysis and analysis.get('base_info'):
-                                        invest_amt = analysis['base_info']['amount']
+                                            paid_status = "Ödenmedi"
 
-                                    # Fraud raporu hazırla
-                                    report_lines = [
-                                        f"İsim Soyisim   : {name}",
-                                        f"K. Adı         : {username}",
-                                        f"Talep Miktarı  : {fmt_tl(req_amount) if req_amount is not None else '-'}",
-                                        f"Talep yöntemi  : {pay_method}",
-                                        f"Yatırım Miktarı: {fmt_tl(invest_amt) if invest_amt else '-'}",
-                                        f"Oyun Türü      : {oyun_turu}",
-                                        f"Arka Bakiye    : {fmt_tl(balance)}",
-                                        f"Oyuna Devam    : {oyuna_devam}",
-                                        "",
-                                        f"T. Yatırım Miktarı: {fmt_tl(total_dep_amt) if total_dep_amt is not None else '-'}",
-                                        f"T. Çekim Miktarı  : {fmt_tl(total_wd_amt) if total_wd_amt is not None else '-'}",
-                                        f"T. Çekim Adedi    : {total_wd_count}",
-                                        f"T. Yatırım Adedi  : {total_dep_count}",
+                                    # Oluşturan kişi: sahadaki olası kolonlardan ilk dolu olanı al
+                                    creator_keys = [
+                                        "CreatedBy", "CreatedByLogin", "CreatedByUserName", "ManagerName", "UserName", "CreatorName", "CreatedById"
                                     ]
-                                    
-                                    # Son bonus varsa ekle
-                                    if son_bonus_info:
-                                        report_lines.append(f"Son Bonus         : {son_bonus_info}")
-                                    
-                                    # Açıklama varsa ekle
-                                    if aciklama:
-                                        report_lines.append(f"Açıklama          : {aciklama}")
+                                    creator = "-"
+                                    for ck in creator_keys:
+                                        if ck in last_bonus.columns and pd.notna(lb.get(ck)) and str(lb.get(ck)).strip() != "":
+                                            creator = str(lb.get(ck))
+                                            break
 
-                                    fraud_text = "\n".join(report_lines)
-                                    st.text_area("Fraud Raporu (kopyalanabilir)", value=fraud_text, height=300, key=f"fraud_ta_{client_id}")
-                                    
-                                    # Basit çekim raporu (BankTransferBME için)
-                                    try:
-                                        pay_method_norm = str(pay_method or '').strip().lower()
-                                        is_bme = 'banktransferbme' in pay_method_norm
-                                        
-                                        if is_bme:
-                                            st.subheader("📄 Çekim Raporu (Banka Havale)")
-                                            info_text = df.at[sel_idx, 'Bilgi'] if 'Bilgi' in df.columns else ''
-                                            
-                                            # Bilgi alanını ayrıştır
-                                            name_wd = '-'
-                                            bank_wd = '-'
-                                            iban_wd = '-'
-                                            
-                                            if info_text:
-                                                # İsim
-                                                m_name = re.search(r"Hesap\s*Ad[ıi]\s*(?:ve\s*Soyad[ıi]|Soyad[ıi])\s*[:=]\s*([^,\n]+)", info_text, re.IGNORECASE)
-                                                if m_name:
-                                                    name_wd = m_name.group(1).strip()
+                                    # Kart görünümü
+                                    c1, c2, c3, c4 = st.columns([2,1,2,2])
+                                    with c1:
+                                        st.write(f"Bonus Adı: {name}")
+                                    with c2:
+                                        st.write(f"Miktar: {amount if amount is not None else '-'}")
+                                    with c3:
+                                        st.write(f"Bonus Tarihi: {date_str}")
+                                    with c4:
+                                        st.write(f"Ödeme Durumu: {paid_status}")
 
-                                                # Banka
-                                                m_bank = re.search(r"Banka\s*Ad[ıi]\s*[:=]\s*([^,\n]+)", info_text, re.IGNORECASE)
-                                                if m_bank:
-                                                    bank_wd = m_bank.group(1).strip()
+                                    c5, c6 = st.columns([3,2])
+                                    with c5:
+                                        st.write(f"Açıklama: {desc}")
+                                    with c6:
+                                        st.write(f"Oluşturan: {creator}")
 
-                                                # IBAN
-                                                m_iban = re.search(r"IBAN\s*(?:Numaras[ıi])?\s*[:=]\s*([A-Z]{2}[0-9A-Z\s]{10,})", info_text, re.IGNORECASE)
-                                                if m_iban:
-                                                    iban_wd = m_iban.group(1).replace(' ', '').upper()
+                                    # Son bonus için sadece istenen alanlarla tablo
+                                    col_map = {
+                                        'Name': 'Name',
+                                        'Amount': 'Amount',
+                                        'ResultDateLocal': 'ResultDateLocal',
+                                        'Description': 'Description',
+                                        # typo/fallback alanları da kontrol et
+                                        'CreatedByUserName': 'CreatedByUserName',
+                                        'CreatedByUsername': 'CreatedByUserName',
+                                        'CreatedBy': 'CreatedByUserName',
+                                        'ModifiedByUserName': 'ModifiedByUserName',
+                                        'ModifiedByUsername': 'ModifiedByUserName',
+                                        'ModifiedBy': 'ModifiedByUserName',
+                                    }
+                                    # Mevcut kolonlardan eşleştirme
+                                    present = {}
+                                    for src, dst in col_map.items():
+                                        if src in last_bonus.columns and dst not in present:
+                                            present[dst] = last_bonus[src]
+                                    # Eksikleri boş değerle doldur
+                                    for needed in ['Name','Amount','ResultDateLocal','Description','CreatedByUserName','ModifiedByUserName']:
+                                        if needed not in present:
+                                            present[needed] = ['-']
+                                    show_df = pd.DataFrame(present, index=last_bonus.index)[['Name','Amount','ResultDateLocal','Description','CreatedByUserName','ModifiedByUserName']]
+                                    # İstenen sıraya göre, çekim tablosunun hemen altında göster
+                                    with under_table_pl:
+                                        st.dataframe(show_df, use_container_width=True, hide_index=True)
+                                    if show_all:
+                                        with under_table_pl:
+                                            with st.expander("Tüm Bonuslar"):
+                                                st.dataframe(b_df.drop(columns=['_sort_dt'], errors='ignore'), use_container_width=True, hide_index=True)
+                                else:
+                                    st.info("Bonus verisi bulunamadı.")
+                        else:
+                            st.info("Bonus verisi bulunamadı.")
+                    elif ("Müşteri Bonusları" in apps) and bonus_data and bonus_data.get("HasError"):
+                        st.error(bonus_data.get("AlertMessage") or "ClientBonuses isteği hata döndü.")
+                    
+                    # --- İşlem Geçmişi (2-3 günlük, LastDeposit'tan itibaren) ---
+                    try:
+                        # Varsayılan: bugün bitiş, başlangıç = bugün - 2 gün
+                        today_dt = datetime.now()
+                        end_dt_local = today_dt
+                        start_dt_local = end_dt_local - timedelta(days=2)
 
-                                            wd_amount = req_amount
-                                            cekim_text_lines = [
-                                                f"İsimSoyisim : {name_wd}",
-                                                f"İban : {iban_wd}",
-                                                f"Banka : {bank_wd}",
-                                                f"Miktar : {fmt_tl(wd_amount) if wd_amount is not None else '-'}",
-                                                "----------------------------------------",
-                                            ]
-                                            cekim_text = "\n".join(cekim_text_lines)
-                                            st.text_area("Çekim Raporu (kopyalanabilir)", value=cekim_text, height=120, key=f"wd_ta_{client_id}")
-                                    except Exception:
-                                        pass
-                                        
-                            # Çevrim Özeti (Gelişmiş)
-                            if "Çevrim Özeti (1x)" in apps:
-                                with under_table_pl:
-                                    st.subheader("📊 Çevrim Özeti (Gelişmiş)")
-                                    
-                                    # İşlem geçmişini al ve analiz et
-                                    analysis = analyze_client_transactions(client_id, config.get("token", ""))
-                                    
-                                    if analysis and analysis.get('last_deposit'):
-                                        # Temel işlem bilgisi
-                                        base_info = analysis['base_info']
-                                        st.info(f"💰 Temel İşlem: {base_info['type']} - "
-                                               f"{base_info['amount']:,.2f} TL "
-                                               f"({pd.to_datetime(base_info['date']).strftime('%d.%m.%Y %H:%M') if base_info.get('date') else 'Tarih yok'})")
-                                        
-                                        # Ana metrikler
-                                        col1, col2, col3, col4 = st.columns(4)
-                                        col1.metric("Temel Miktar", f"{base_info['amount']:,.2f} TL")
-                                        col2.metric("Toplam Bahis", f"{analysis['total_bet']:,.2f} TL")
-                                        col3.metric("Net Kar/Zarar", 
-                                                   f"{analysis['net_profit']:,.2f} TL",
-                                                   delta_color="inverse")
-                                        
-                                        # Çevrim oranı hesaplama
-                                        turnover_ratio = analysis['turnover_ratio']
-                                        target_ratio = 1.0
-                                        col4.metric("Çevrim Oranı", 
-                                                   f"{turnover_ratio:.2f}x",
-                                                   f"Hedef: {target_ratio}x")
-                                        
-                                        # İlerleme çubuğu
-                                        progress = min(turnover_ratio / target_ratio, 1.0)
-                                        st.progress(progress, text=f"Çevrim İlerlemesi: %{progress*100:.1f}")
-                                        
-                                        # Durum değerlendirmesi
-                                        if turnover_ratio >= target_ratio:
-                                            st.success("🎉 Çevrim tamamlandı! Kullanıcı gerekli bahis çevrimini yapmıştır.")
-                                        else:
-                                            remaining = (base_info['amount'] * target_ratio) - analysis['total_bet']
-                                            st.warning(f"⚠️ Çevrim tamamlanmadı. Kalan: {remaining:,.2f} TL bahis yapması gerekiyor.")
-                                        
-                                        # Kayıp bonusu analizi
-                                        if base_info['type'] == 'Kayıp Bonusu':
-                                            bonus_amount = base_info['amount']
-                                            max_withdrawal = bonus_amount * 30
-                                            st.info(f"🎁 Kayıp Bonusu: {bonus_amount:,.2f} TL → "
-                                                   f"Max. Çekilebilir: {max_withdrawal:,.2f} TL (30x kuralı)")
-                                        
-                                        # Oyun bazında kısa özet
-                                        if analysis['bets'] and analysis['wins']:
-                                            with st.expander("🎮 Oyun Bazında Özet"):
-                                                df_bets = pd.DataFrame(analysis['bets'])
-                                                df_wins = pd.DataFrame(analysis['wins'])
-                                                
-                                                if not df_bets.empty and not df_wins.empty:
-                                                    # Oyun bazında toplam
-                                                    game_bets = df_bets.groupby('Game')['Amount'].sum()
-                                                    game_wins = df_wins.groupby('Game')['Amount'].sum()
-                                                    
-                                                    game_summary = pd.DataFrame({
-                                                        'Oyun': game_bets.index,
-                                                        'Bahis': game_bets.values,
-                                                        'Kazanç': [game_wins.get(game, 0) for game in game_bets.index],
-                                                    })
-                                                    game_summary['Net'] = game_summary['Kazanç'] - game_summary['Bahis']
-                                                    game_summary = game_summary.sort_values('Net', ascending=False)
-                                                    
-                                                    st.dataframe(game_summary, hide_index=True, use_container_width=True)
-                                        
+                        # KPI'dan LastDepositTimeLocal varsa ve daha yeniyse başlangıcı ona çek
+                        last_dep_str = (k or {}).get("LastDepositTimeLocal") if isinstance(k, dict) else None
+                        if last_dep_str:
+                            try:
+                                last_dep = pd.to_datetime(last_dep_str, dayfirst=True, errors='coerce')
+                                if pd.notna(last_dep) and last_dep > start_dt_local:
+                                    start_dt_local = last_dep.to_pydatetime()
+                            except Exception:
+                                pass
+
+                        # 3 günü aşmasın
+                        if (end_dt_local - start_dt_local).days > 3:
+                            start_dt_local = end_dt_local - timedelta(days=3)
+
+                        # Accounts'tan Currency ve BalanceTypeId türet
+                        currency_id = "TRY"
+                        balance_type_id = "5211"
+                        try:
+                            rows = acc_data.get("Data") if isinstance(acc_data, dict) else None
+                            if isinstance(rows, list) and len(rows) > 0:
+                                first_row = rows[0]
+                                if isinstance(first_row, dict):
+                                    if first_row.get("CurrencyId"):
+                                        currency_id = str(first_row.get("CurrencyId"))
+                                    # AccountId formatı: "5211-...-TRY" -> ilk parça balance type id olabilir
+                                    acc_id = first_row.get("AccountId")
+                                    if isinstance(acc_id, str) and "-" in acc_id:
+                                        parts = acc_id.split("-")
+                                        if parts and parts[0].isdigit():
+                                            balance_type_id = parts[0]
+                                    elif first_row.get("BalanceTypeId"):
+                                        balance_type_id = str(first_row.get("BalanceTypeId"))
+                        except Exception:
+                            pass
+
+                        tx_url = "https://backofficewebadmin.betconstruct.com/api/tr/Client/GetClientTransactionsByAccount"
+                        tx_headers = {
+                            "Authentication": token.strip(),
+                            "Accept": "application/json, text/plain, */*",
+                            "Content-Type": "application/json;charset=UTF-8",
+                            "Origin": "https://backoffice.betconstruct.com",
+                            "Referer": "https://backoffice.betconstruct.com/",
+                            "X-Requested-With": "XMLHttpRequest",
+                        }
+                        # API dd-mm-yy bekliyor (ör: 25-08-25)
+                        fmt = "%d-%m-%y"
+                        payload_tx = {
+                            "StartTimeLocal": start_dt_local.strftime(fmt),
+                            "EndTimeLocal": end_dt_local.strftime(fmt),
+                            "ClientId": client_id,
+                            "CurrencyId": currency_id,
+                            "BalanceTypeId": str(balance_type_id),
+                            "DocumentTypeIds": [],
+                            "GameId": None,
+                        }
+
+                        # UI
+                        st.caption("İşlem Geçmişi (\u2264 3 gün)")
+                        c1, c2, c3 = st.columns([1,1,2])
+                        with c1:
+                            st.write(f"Başlangıç: {payload_tx['StartTimeLocal']}")
+                        with c2:
+                            st.write(f"Bitiş: {payload_tx['EndTimeLocal']}")
+                        with c3:
+                            st.write(f"Para Birimi: {currency_id}, BalanceTypeId: {balance_type_id}")
+
+                        try:
+                            tx_resp = requests.post(tx_url, headers=tx_headers, json=payload_tx, timeout=30, verify=False)
+                            tx_data = tx_resp.json()
+                        except Exception as e:
+                            st.error(f"İşlem geçmişi isteği başarısız: {e}")
+                            tx_data = None
+
+                        if debug_kpi and tx_data is not None:
+                            with st.expander("Transactions Ham Yanıt"):
+                                st.json(tx_data)
+
+                        if tx_data and not tx_data.get("HasError"):
+                            tx_root = tx_data.get("Data") or {}
+                            tx_rows = tx_root.get("Objects") or []
+                            if isinstance(tx_rows, list) and tx_rows:
+                                tx_df = pd.DataFrame(tx_rows)
+                                # Özet: Bahis (DocumentTypeId==10, Operation==1) ve Kazanç (DocumentTypeId==15, Operation==2)
+                                total_bet = 0.0
+                                total_win = 0.0
+                                try:
+                                    if 'DocumentTypeId' in tx_df.columns and 'Operation' in tx_df.columns and 'Amount' in tx_df.columns:
+                                        total_bet = float(tx_df[(tx_df['DocumentTypeId'] == 10) & (tx_df['Operation'] == 1)]['Amount'].sum())
+                                        total_win = float(tx_df[(tx_df['DocumentTypeId'] == 15) & (tx_df['Operation'] == 2)]['Amount'].sum())
                                     else:
-                                        # Fallback: Basit KPI hesabı
-                                        st.warning("⚠️ Detaylı işlem geçmişi alınamadı. Genel KPI ile hesaplama:")
-                                        
-                                        c1, c2, c3 = st.columns(3)
-                                        total_deposit = k.get('DepositAmount', 0) or 0
-                                        total_stakes = (k.get('TotalSportStakes', 0) or 0) + (k.get('TotalCasinoStakes', 0) or 0)
-                                        turnover_ratio = (total_stakes / total_deposit) if total_deposit > 0 else 0
-                                        
-                                        c1.metric("Toplam Yatırım", f"{total_deposit:,.2f} TL")
-                                        c2.metric("Toplam Bahis", f"{total_stakes:,.2f} TL")
-                                        c3.metric("Çevrim Oranı", f"{turnover_ratio:.2f}x")
-                                        
-                                        if turnover_ratio >= 1.0:
-                                            st.success("✅ Çevrim tamamlandı (genel hesap)")
+                                        # Yedek: isimlerle dene
+                                        if 'DocumentTypeName' in tx_df.columns:
+                                            total_bet = float(tx_df[tx_df['DocumentTypeName'].fillna('').str.contains('Bahis', case=False)]['Amount'].sum())
+                                            total_win = float(tx_df[tx_df['DocumentTypeName'].fillna('').str.contains('Kazanç', case=False)]['Amount'].sum())
+                                except Exception:
+                                    pass
+
+                                m_a, m_b, m_c = st.columns(3)
+                                m_a.metric("Toplam Bahis", f"{total_bet:,.2f}")
+                                m_b.metric("Toplam Kazanç", f"{total_win:,.2f}")
+                                m_c.metric("Net", f"{(total_win - total_bet):,.2f}")
+
+                                # Görsel tablo
+                                preferred_cols = [
+                                    "CreatedLocal", "DocumentTypeName", "Operation", "Amount", "Game", "PaymentSystemName", "Balance"
+                                ]
+                                cols = [c for c in preferred_cols if c in tx_df.columns] + [c for c in tx_df.columns if c not in preferred_cols]
+                                st.dataframe(tx_df[cols], use_container_width=True, hide_index=True)
+
+                                # --- 1x Çevrim Hesabı (Otomatik) ---
+                                try:
+                                    # Tarih alanını hazırla
+                                    tx_df['_Date'] = pd.to_datetime(tx_df.get('CreatedLocal', pd.NaT), errors='coerce')
+
+                                    # Yatırım işlemleri (isim bazlı)
+                                    deposits = pd.DataFrame()
+                                    if 'DocumentTypeName' in tx_df.columns:
+                                        deposits = tx_df[tx_df['DocumentTypeName'].fillna('').str.contains('Yatırım', case=False, na=False)]
+
+                                    # Kayıp bonusu işlemleri
+                                    loss_bonus_df = pd.DataFrame()
+                                    if 'DocumentTypeId' in tx_df.columns:
+                                        loss_bonus_df = tx_df[tx_df['DocumentTypeId'] == 309]
+                                    if loss_bonus_df.empty and 'DocumentTypeName' in tx_df.columns:
+                                        loss_bonus_df = tx_df[tx_df['DocumentTypeName'].fillna('').str.contains('Kayıp Bonusu|Bonus', case=False, regex=True, na=False)]
+
+                                    base_type = None
+                                    base_row = None
+                                    base_amount = None
+                                    base_date = None
+                                    dep_date = None  # son yatırım tarihi
+
+                                    if not deposits.empty:
+                                        last_dep = deposits.sort_values('_Date', ascending=False).iloc[0]
+                                        dep_date = last_dep['_Date']
+                                        # Depozitten sonra gelen son kayıp bonusu var mı?
+                                        recent_loss_after_dep = loss_bonus_df[loss_bonus_df['_Date'] >= dep_date] if not loss_bonus_df.empty else pd.DataFrame()
+                                        if not recent_loss_after_dep.empty:
+                                            base_row = recent_loss_after_dep.sort_values('_Date', ascending=False).iloc[0]
+                                            base_type = 'Kayıp Bonusu'
                                         else:
-                                            remaining = total_deposit - total_stakes
-                                            st.warning(f"⚠️ Kalan: {remaining:,.2f} TL")
-                                            st.progress(min(turnover_ratio, 1.0))
+                                            base_row = last_dep
+                                            base_type = 'Yatırım'
+                                    elif not loss_bonus_df.empty:
+                                        base_row = loss_bonus_df.sort_values('_Date', ascending=False).iloc[0]
+                                        base_type = 'Kayıp Bonusu'
+
+                                    if base_row is not None:
+                                        try:
+                                            base_amount = float(base_row.get('Amount', 0) or 0)
+                                        except Exception:
+                                            base_amount = 0.0
+                                        base_date = base_row.get('_Date')
+
+                                    # Base tarihinden sonraki işlemler
+                                    df_after = tx_df.copy()
+                                    if isinstance(base_date, pd.Timestamp) and pd.notna(base_date):
+                                        df_after = df_after[df_after['_Date'] >= base_date]
+
+                                    # Bahis/Kazanç tespiti
+                                    def _sum_amount(df, cond):
+                                        try:
+                                            return float(df.loc[cond, 'Amount'].sum())
+                                        except Exception:
+                                            return 0.0
+
+                                    bets_amt = total_bet
+                                    wins_amt = total_win
+                                    if not df_after.empty:
+                                        if {'DocumentTypeId','Operation','Amount'}.issubset(df_after.columns):
+                                            bets_amt = _sum_amount(df_after, (df_after['DocumentTypeId'] == 10) & (df_after['Operation'] == 1))
+                                            wins_amt = _sum_amount(df_after, (df_after['DocumentTypeId'] == 15) & (df_after['Operation'] == 2))
+                                        elif 'DocumentTypeName' in df_after.columns and 'Amount' in df_after.columns:
+                                            bets_amt = _sum_amount(df_after, df_after['DocumentTypeName'].fillna('').str.contains('Bahis', case=False))
+                                            wins_amt = _sum_amount(df_after, df_after['DocumentTypeName'].fillna('').str.contains('Kazanç', case=False))
+
+                                    turnover_ratio = (bets_amt / base_amount) if (base_amount and base_amount > 0) else None
+
+                                    # --- Oyun Bazında Kazanç Analizi ---
+                                    # Başlık ve tablo placeholders ile yönetilecek; anlatım önce, başlık sonra
+                                    if not df_after.empty and 'Game' in df_after.columns and 'Amount' in df_after.columns:
+                                        # Bahis ve kazançları ayır
+                                        if {'DocumentTypeId','Operation'}.issubset(df_after.columns):
+                                            df_bets = df_after[(df_after['DocumentTypeId'] == 10) & (df_after['Operation'] == 1)][['Game','Amount']].copy()
+                                            df_wins = df_after[(df_after['DocumentTypeId'] == 15) & (df_after['Operation'] == 2)][['Game','Amount']].copy()
+                                        else:
+                                            df_bets = df_after[df_after['DocumentTypeName'].fillna('').str.contains('Bahis', case=False)][['Game','Amount']].copy()
+                                            df_wins = df_after[df_after['DocumentTypeName'].fillna('').str.contains('Kazanç', case=False)][['Game','Amount']].copy()
+
+                                        game_bets = df_bets.groupby('Game')['Amount'].sum().reset_index(name='Toplam_Bahis') if not df_bets.empty else pd.DataFrame(columns=['Game','Toplam_Bahis'])
+                                        game_wins = df_wins.groupby('Game')['Amount'].sum().reset_index(name='Toplam_Kazanc') if not df_wins.empty else pd.DataFrame(columns=['Game','Toplam_Kazanc'])
+                                        game_analysis = pd.merge(game_bets, game_wins, on='Game', how='outer').fillna(0)
+                                        game_analysis['Net_Kar'] = game_analysis['Toplam_Kazanc'] - game_analysis['Toplam_Bahis']
+                                        game_analysis = game_analysis.sort_values('Net_Kar', ascending=False)
+
+                                        # Önce anlatım, sonra seçime göre diğer bölümler (hepsi tablo altı konteynerde)
+                                        try:
+                                            toplam_net = float(game_analysis['Net_Kar'].sum())
+                                            kaynak_adi = 'Kayıp Bonusu' if (base_type == 'Kayıp Bonusu') else 'Ana Para'
+                                            apps_sel = set(st.session_state.get('below_table_apps', []))
+                                            profit_sentence = ""
+                                            if "Kar Anlatımı (💰)" in apps_sel and toplam_net > 0:
+                                                katkı_eşiği = toplam_net * 0.10  # en az %10 katkı yapan oyunlar
+                                                ana_katkilar = game_analysis[game_analysis['Net_Kar'] > katkı_eşiği]
+                                                with under_table_pl:
+                                                    if not ana_katkilar.empty and len(ana_katkilar) > 1:
+                                                        oyunlar = ", ".join([str(x) for x in ana_katkilar['Game'].tolist()])
+                                                        toplam_ana = float(ana_katkilar['Net_Kar'].sum())
+                                                        profit_sentence = f"💰 {kaynak_adi} ile ({base_amount:,.2f} TL) {oyunlar} oyunlarından toplam {toplam_ana:,.2f} TL net kar elde edilmiştir."
+                                                        st.info(profit_sentence)
+                                                    else:
+                                                        top_row = game_analysis.head(1)
+                                                        if not top_row.empty and float(top_row['Net_Kar'].iloc[0]) > 0:
+                                                            oyun_adi = str(top_row['Game'].iloc[0])
+                                                            net_kar = float(top_row['Net_Kar'].iloc[0])
+                                                            profit_sentence = f"💰 {kaynak_adi} ile ({base_amount:,.2f} TL) {oyun_adi} oyunundan {net_kar:,.2f} TL net kar elde edilmiştir."
+                                                            st.info(profit_sentence)
+                                                    # Cümle yalnızca bu seçim bağlamında kullanılacak
+                                        except Exception:
+                                            pass
+
+                                        # Çevrim Özeti (1x) ve çekim sayısı
+                                        apps_sel = set(st.session_state.get('below_table_apps', []))
+                                        if "Çevrim Özeti (1x)" in apps_sel:
+                                            with under_table_pl:
+                                                st.subheader("Çevrim Özeti (1x)")
+                                                c1, c2, c3, c4, c5 = st.columns(5)
+                                                c1.metric("Baz İşlem", base_type or "-" )
+                                                c2.metric("Baz Tutar", f"{base_amount:,.2f}" if base_amount else "-")
+                                                c3.metric("Baz Tarih", base_date.strftime('%d.%m.%Y %H:%M') if isinstance(base_date, pd.Timestamp) else "-")
+                                                c4.metric("Çevrim Oranı", f"{turnover_ratio:.2f}x / 1x" if turnover_ratio is not None else "-" )
+                                                c5.metric("Toplam Bahis", f"{bets_amt:,.2f}")
+
+                                                if turnover_ratio is not None:
+                                                    st.progress(min(turnover_ratio, 1.0))
+                                                    remaining = max((base_amount - bets_amt), 0) if base_amount else None
+                                                    if remaining is not None and remaining > 0:
+                                                        st.warning(f"Kalan Çevrim: {remaining:,.2f}")
+                                                    elif remaining is not None:
+                                                        st.success("Çevrim tamamlandı (1x)")
+
+                                                # Son yatırımdan sonra kaçıncı kez çekime geldi?
+                                                try:
+                                                    withdraw_mask = tx_df['DocumentTypeName'].fillna('').str.contains('Çekim Talebi', case=False, na=False) if 'DocumentTypeName' in tx_df.columns else pd.Series([], dtype=bool)
+                                                    wd_df = tx_df[withdraw_mask].copy()
+                                                    if isinstance(dep_date, pd.Timestamp) and pd.notna(dep_date):
+                                                        wd_df = wd_df[pd.to_datetime(wd_df['CreatedLocal'], errors='coerce') >= dep_date]
+                                                    wd_count = int(wd_df.shape[0])
+                                                    st.metric("Son Yatırımdan Sonra Çekim Sayısı", wd_count)
+                                                except Exception:
+                                                    pass
+
+                                        # Oyun analizi tablosu
+                                        if "Oyun Analizi" in apps_sel:
+                                            with under_table_pl:
+                                                st.subheader("📊 Oyun Bazında Kazanç Analizi")
+                                                st.dataframe(game_analysis.rename(columns={'Game':'Oyun'}), use_container_width=True, hide_index=True)
+                                        # --- Fraud Raporu + Çekim Raporu (yan yana) ---
+                                        if "Fraud Raporu" in apps_sel:
+                                            def fmt_tl(val):
+                                                try:
+                                                    n = float(val)
+                                                except Exception:
+                                                    return "-"
+                                                # 1,234,567.89 -> 1.234.567,89
+                                                s = f"{n:,.2f}"
+                                                s = s.replace(",", "_").replace(".", ",").replace("_", ".")
+                                                return f"{s} TL"
+
+                                            try:
+                                                name = df.at[sel_idx, 'Müşteri Adı'] if 'Müşteri Adı' in df.columns else "-"
+                                                username = df.at[sel_idx, 'Kullanıcı Adı'] if 'Kullanıcı Adı' in df.columns else "-"
+                                                req_amount = df.at[sel_idx, 'Miktar'] if 'Miktar' in df.columns else None
+                                                pay_method = df.at[sel_idx, 'Ödeme Yöntemi'] if 'Ödeme Yöntemi' in df.columns else "-"
+                                            except Exception:
+                                                name, username, req_amount, pay_method = "-", "-", None, "-"
+
+                                            # Yatırım miktarı: baz tutar
+                                            invest_amt = base_amount if base_amount else 0.0
+
+                                            # Oyun türü: KPI verilerine göre basit çıkarım
+                                            oyun_turu = "-"
+                                            try:
+                                                sport_stake = k.get("TotalSportStakes") if isinstance(k, dict) else None
+                                                casino_stake = k.get("TotalCasinoStakes") if isinstance(k, dict) else None
+                                                if casino_stake and float(casino_stake) > 0:
+                                                    oyun_turu = "Casino"
+                                                elif sport_stake and float(sport_stake) > 0:
+                                                    oyun_turu = "Spor"
+                                            except Exception:
+                                                pass
+
+                                            # Arka bakiye: hesap bakiyeleri toplamı
+                                            back_balance = None
+                                            try:
+                                                rows = (acc_data or {}).get("Data") if isinstance(acc_data, dict) else None
+                                                if rows and isinstance(rows, list):
+                                                    tmp = pd.DataFrame(rows)
+                                                    cand_cols = [c for c in ["AvailableBalance", "Balance", "Amount"] if c in tmp.columns]
+                                                    if cand_cols:
+                                                        back_balance = float(tmp[cand_cols[0]].sum())
+                                            except Exception:
+                                                back_balance = None
+
+                                            # Oyuna devam: son 24 saatte bahis var mı?
+                                            oyun_devam = "-"
+                                            try:
+                                                recent_limit = datetime.now() - timedelta(hours=24)
+                                                recent = False
+                                                if 'CreatedLocal' in tx_df.columns and 'DocumentTypeName' in tx_df.columns:
+                                                    t = pd.to_datetime(tx_df['CreatedLocal'], errors='coerce')
+                                                    mask = (t >= recent_limit) & (tx_df['DocumentTypeName'].fillna('').str.contains('Bahis', case=False))
+                                                    recent = bool(tx_df.loc[mask].shape[0] > 0)
+                                                oyun_devam = "Evet" if recent else "Hayır"
+                                            except Exception:
+                                                oyun_devam = "-"
+
+                                            # Toplamlar ve adetler
+                                            total_dep_amt = None
+                                            total_wd_amt = None
+                                            dep_count = None
+                                            wd_count_all = None
+                                            try:
+                                                # KPI'dan miktarlar
+                                                if isinstance(k, dict):
+                                                    total_dep_amt = k.get("DepositAmount")
+                                                    total_wd_amt = k.get("WithdrawalAmount")
+
+                                                    # KPI'dan adetler (çeşitli alan isimlerini dene)
+                                                    dep_count_keys = [
+                                                        "DepositCount", "DepositsCount", "TotalDepositCount", "TotalDepositsCount"
+                                                    ]
+                                                    wd_count_keys = [
+                                                        "WithdrawalCount", "WithdrawalsCount", "TotalWithdrawalCount", "TotalWithdrawalsCount"
+                                                    ]
+                                                    for kk in dep_count_keys:
+                                                        if dep_count is None and k.get(kk) is not None:
+                                                            try:
+                                                                dep_count = int(k.get(kk))
+                                                            except Exception:
+                                                                pass
+                                                    for kk in wd_count_keys:
+                                                        if wd_count_all is None and k.get(kk) is not None:
+                                                            try:
+                                                                wd_count_all = int(k.get(kk))
+                                                            except Exception:
+                                                                pass
+
+                                                # Fallback: işlem geçmişinden say (daha kapsamlı kalıplar)
+                                                if isinstance(tx_df, pd.DataFrame):
+                                                    col = None
+                                                    if 'DocumentTypeName' in tx_df.columns:
+                                                        col = tx_df['DocumentTypeName'].fillna('')
+                                                    elif 'DocumentType' in tx_df.columns:
+                                                        col = tx_df['DocumentType'].fillna('')
+                                                    if col is not None:
+                                                        dep_mask = col.str.contains(r"Yat[ıi]r[ıi]m|Deposit|Para\s*Yat", case=False, regex=True)
+                                                        wd_mask = col.str.contains(r"[ÇC]ek[ıi]m|Withdraw", case=False, regex=True)
+                                                        if dep_count is None:
+                                                            dep_count = int(tx_df.loc[dep_mask].shape[0])
+                                                        if wd_count_all is None:
+                                                            wd_count_all = int(tx_df.loc[wd_mask].shape[0])
+                                            except Exception:
+                                                pass
+
+                                            # Açıklama: Bu seçim için oluşan kar cümlesi; yoksa yerel fallback üret
+                                            aciklama = profit_sentence if ('profit_sentence' in locals() and profit_sentence) else ''
+                                            if not aciklama:
+                                                try:
+                                                    top_row_fb = game_analysis.head(1)
+                                                    if not top_row_fb.empty and float(top_row_fb['Net_Kar'].iloc[0]) > 0:
+                                                        oyun_adi_fb = str(top_row_fb['Game'].iloc[0])
+                                                        net_kar_fb = float(top_row_fb['Net_Kar'].iloc[0])
+                                                        kay_fb = 'Kayıp Bonusu' if (base_type == 'Kayıp Bonusu') else 'Ana Para'
+                                                        aciklama = f"💰 {kay_fb} ile ({base_amount:,.2f} TL) {oyun_adi_fb} oyunundan {net_kar_fb:,.2f} TL net kar elde edilmiştir."
+                                                except Exception:
+                                                    aciklama = ''
+
+                                            # Metin kalıbı
+                                            report_lines = [
+                                                f"İsim Soyisim   : {name}",
+                                                f"K. Adı         : {username}",
+                                                f"Talep Miktarı  : {fmt_tl(req_amount) if req_amount is not None else '-'}",
+                                                f"Talep yöntemi  : {pay_method}",
+                                                f"Yatırım Miktarı: {fmt_tl(invest_amt) if invest_amt else '-'}",
+                                                f"Oyun Türü      : {oyun_turu}",
+                                                f"Arka Bakiye    : {fmt_tl(back_balance) if back_balance is not None else '-'}",
+                                                f"Oyuna Devam    : {oyun_devam}",
+                                                "",
+                                                f"T. Yatırım Miktarı: {fmt_tl(total_dep_amt) if total_dep_amt is not None else '-'}",
+                                                f"T. Çekim Miktarı  : {fmt_tl(total_wd_amt) if total_wd_amt is not None else '-'}",
+                                                f"T. Çekim Adedi    : {wd_count_all if wd_count_all is not None else '-'}",
+                                                f"T. Yatırım Adedi  : {dep_count if dep_count is not None else '-'}",
+                                                f"Açıklama          : {aciklama}",
+                                            ]
+
+                                            fraud_text = "\n".join(report_lines)
+                                            with under_table_pl:
+                                                col_fraud, col_withd = st.columns(2)
+                                                with col_fraud:
+                                                    st.subheader("🔎 Fraud Raporu")
+                                                    st.text_area("Rapor (kopyalanabilir)", value=fraud_text, height=240, key=f"fraud_ta_{client_id}")
+                                                    # Kopyalama butonu
+                                                    try:
+                                                        btn_id = f"copy_fraud_{client_id}"
+                                                        script = f'''
+                                                        <button id="{btn_id}" style="margin-top:6px">Kopyala</button>
+                                                        <script>
+                                                        const btn = document.getElementById('{btn_id}');
+                                                        if (btn) {{
+                                                          btn.onclick = function() {{
+                                                            const ta = window.parent.document.querySelector('[data-testid="stTextArea"] textarea');
+                                                            if (ta) navigator.clipboard.writeText(ta.value);
+                                                          }}
+                                                        }}
+                                                        </script>
+                                                        '''
+                                                        components.html(script, height=40)
+                                                    except Exception:
+                                                        pass
+
+                                                # --- Çekim Raporu (sadece BankTransferBME) ---
+                                                try:
+                                                    pay_method_norm = str(pay_method or '').strip().lower()
+                                                except Exception:
+                                                    pay_method_norm = ''
+                                                is_bme = 'banktransferbme' in pay_method_norm
+                                                with col_withd:
+                                                    if is_bme:
+                                                        st.subheader("📄 Çekim Raporu (Banka Havale)")
+
+                                                        # Bilgi alanını ayrıştır
+                                                        info_text = df.at[sel_idx, 'Bilgi'] if 'Bilgi' in df.columns else ''
+                                                        name_wd = '-'
+                                                        bank_wd = '-'
+                                                        iban_wd = '-'
+                                                        try:
+                                                            if info_text:
+                                                                # İsim
+                                                                m_name = re.search(r"Hesap\s*Ad[ıi]\s*(?:ve\s*Soyad[ıi]|Soyad[ıi])\s*[:=]\s*([^,\n]+)", info_text, re.IGNORECASE)
+                                                                if not m_name:
+                                                                    m_name = re.search(r"Hesap\s*Adi\s*ve\s*Soyadi\s*[:=]\s*([^,\n]+)", info_text, re.IGNORECASE)
+                                                                if m_name:
+                                                                    name_wd = m_name.group(1).strip()
+
+                                                                # Banka
+                                                                m_bank = re.search(r"Banka\s*Ad[ıi]\s*[:=]\s*([^,\n]+)", info_text, re.IGNORECASE)
+                                                                if not m_bank:
+                                                                    m_bank = re.search(r"Banka\s*Adi\s*[:=]\s*([^,\n]+)", info_text, re.IGNORECASE)
+                                                                if m_bank:
+                                                                    bank_wd = m_bank.group(1).strip()
+
+                                                                # IBAN
+                                                                m_iban = re.search(r"IBAN\s*(?:Numaras[ıi])?\s*[:=]\s*([A-Z]{2}[0-9A-Z\s]{10,})", info_text, re.IGNORECASE)
+                                                                if m_iban:
+                                                                    iban_wd = m_iban.group(1).replace(' ', '').upper()
+                                                        except Exception:
+                                                            pass
+
+                                                        wd_amount = req_amount
+                                                        cekim_text_lines = [
+                                                            f"İsimSoyisim : {name_wd}",
+                                                            f"İban : {iban_wd}",
+                                                            f"Banka : {bank_wd}",
+                                                            f"Miktar : {fmt_tl(wd_amount) if wd_amount is not None else '-'}",
+                                                            "----------------------------------------",
+                                                        ]
+                                                        cekim_text = "\n".join(cekim_text_lines)
+                                                        st.text_area("Çekim Raporu (kopyalanabilir)", value=cekim_text, height=170, key=f"wd_ta_{client_id}")
+                                                        # Kopyalama butonu
+                                                        try:
+                                                            btn2_id = f"copy_wd_{client_id}"
+                                                            script2 = f'''
+                                                            <button id="{btn2_id}" style="margin-top:6px">Kopyala</button>
+                                                            <script>
+                                                            const btn = document.getElementById('{btn2_id}');
+                                                            if (btn) {{
+                                                              btn.onclick = function() {{
+                                                                const areas = window.parent.document.querySelectorAll('[data-testid="stTextArea"] textarea');
+                                                                if (areas && areas.length > 0) {{
+                                                                  navigator.clipboard.writeText(areas[areas.length-1].value);
+                                                                }}
+                                                              }}
+                                                            }}
+                                                            </script>
+                                                            '''
+                                                            components.html(script2, height=40)
+                                                        except Exception:
+                                                            pass
+                                except Exception as e:
+                                    st.info(f"Çevrim özeti oluşturulamadı: {e}")
+                            else:
+                                st.info("Seçilen aralıkta işlem bulunamadı.")
+                        elif tx_data and tx_data.get("HasError"):
+                            st.error(tx_data.get("AlertMessage") or "Transactions isteği hata döndü.")
+                    except Exception as e:
+                        st.warning(f"İşlem geçmişi bölümü çalıştırılırken uyarı: {e}")
+            
+        else:
+            st.info("Seçilen tarih aralığında çekim talebi bulunamadı.")
 
 if __name__ == "__main__":
     main()
