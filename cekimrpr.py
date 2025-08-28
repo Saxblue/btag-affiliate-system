@@ -161,7 +161,15 @@ def load_config():
     default_config = {
         "token": "affe433a578d139ed6aa4e3c02bbdd7e341719493c31e3c39a8ee60711aaeb75",
         "api_url": "https://backofficewebadmin.betconstruct.com/api/tr/Client/GetClientWithdrawalRequestsWithTotals",
-        "auto_refresh_interval": 30  # 30 saniye
+        "auto_refresh_interval": 30,  # 30 saniye
+        # Tablo altı uygulamalar için kalıcı varsayılanlar
+        "below_table_apps": [
+            "Oyun Analizi",
+            "Fraud Raporu",
+            "Müşteri Bonusları",
+            "Kar Anlatımı (💰)",
+            "Çevrim Özeti (1x)"
+        ],
     }
 
     try:
@@ -652,13 +660,54 @@ def main():
             "Müşteri Bonusları",
             "Fraud Raporu",
         ]
-        st.multiselect(
+        # Varsayılanları session_state > config sırasıyla belirle ve doğrula
+        ss_existing = st.session_state.get("below_table_apps", None)
+        cfg_existing = config.get("below_table_apps", ["Kar Anlatımı (💰)"])
+        if not isinstance(cfg_existing, list):
+            cfg_existing = ["Kar Anlatımı (💰)"]
+        # Sadece geçerli seçenekler kalsın
+        cfg_existing = [x for x in cfg_existing if x in app_options]
+        if not cfg_existing:
+            cfg_existing = ["Kar Anlatımı (💰)"]
+        # Eski tekli varsayılanı veya eski üçlüyü yeni kalıcı beşliye migrate et
+        legacy_default_single = ["Kar Anlatımı (💰)"]
+        legacy_default_trio = ["Oyun Analizi", "Fraud Raporu", "Müşteri Bonusları"]
+        new_default = [
+            "Oyun Analizi",
+            "Fraud Raporu",
+            "Müşteri Bonusları",
+            "Kar Anlatımı (💰)",
+            "Çevrim Özeti (1x)"
+        ]
+        needs_migration = (cfg_existing == legacy_default_single) or (sorted(cfg_existing) == sorted(legacy_default_trio))
+        if needs_migration or any(x not in cfg_existing for x in ["Kar Anlatımı (💰)", "Çevrim Özeti (1x)"]):
+            # Yeni varsayılanı uygula
+            cfg_existing = new_default
+            config["below_table_apps"] = new_default
+            try:
+                save_config(config)
+            except Exception:
+                pass
+        default_below_apps = ss_existing if isinstance(ss_existing, list) and ss_existing else cfg_existing
+
+        selected_below_apps = st.multiselect(
             "Tablo altı uygulamalar",
             options=app_options,
-            default=["Kar Anlatımı (💰)"],
+            default=default_below_apps,
             key="below_table_apps",
             help="Çekim talepleri tablosunun hemen altında hangi bölümlerin gösterileceğini seçin."
         )
+
+        # Seçim değiştiyse config'e kaydet (kalıcı varsayılan için)
+        try:
+            current_sel = selected_below_apps if isinstance(selected_below_apps, list) else st.session_state.get("below_table_apps", [])
+            # Boş listeyi yazma; en az bir seçenek olduğunda ve config'den farklıysa kaydet
+            if current_sel and config.get("below_table_apps") != current_sel:
+                config["below_table_apps"] = current_sel
+                save_config(config)
+        except Exception:
+            pass
+        
         # Çekim tablosunu gizle/göster (yan menüde)
         st.sidebar.checkbox("Çekim Tablosunu Gizle", value=False, key="hide_withdrawals_table")
     
