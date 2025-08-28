@@ -1226,10 +1226,6 @@ def main():
                                         f"T. Yatırım Adedi  : {total_dep_count}",
                                     ]
                                     
-                                    # Son bonus varsa ekle
-                                    if son_bonus_info:
-                                        report_lines.append(f"Son Bonus         : {son_bonus_info}")
-                                    
                                     # Açıklama varsa ekle
                                     if aciklama:
                                         report_lines.append(f"Açıklama          : {aciklama}")
