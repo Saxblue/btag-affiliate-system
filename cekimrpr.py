@@ -86,6 +86,17 @@ st.markdown("""
     .stTextInput>label {font-weight:bold;}
     .stAlert {border-radius:10px;}
     .stDataFrame {border-radius:10px;}
+    /* Yardımcı script iframe'lerinden kaynaklı boşlukları kaldır */
+    iframe.stIFrame[height="0"],
+    .stElementContainer iframe.stIFrame[height="0"],
+    .element-container iframe.stIFrame[height="0"] {
+        display: none !important;
+        height: 0 !important;
+        min-height: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        border: 0 !important;
+    }
     .new-request-alert {
         background-color: #e8f5e8;
         border: 2px solid #4CAF50;
@@ -114,8 +125,7 @@ if st.session_state.get('hide_kpi', False):
     </style>
     """, unsafe_allow_html=True)
     # DOM değişikliklerine rağmen güvenli gizleme için JS enjekte et
-    import streamlit.components.v1 as components
-    components.html(
+    st.markdown(
         """
         <script>
         (function(){
@@ -142,7 +152,7 @@ if st.session_state.get('hide_kpi', False):
         })();
         </script>
         """,
-        height=0,
+        unsafe_allow_html=True,
     )
 
 # Token yönetimi fonksiyonları
@@ -170,6 +180,10 @@ def load_config():
             "Kar Anlatımı (💰)",
             "Çevrim Özeti (1x)"
         ],
+        # Tablo altındaki toplam bilgi alertini gizleme tercihi (varsayılan: gizli)
+        "hide_total_info": True,
+        # Veri yüklendi başarı mesajını gizleme tercihi (varsayılan: gizli)
+        "hide_load_success": True,
     }
 
     try:
@@ -710,6 +724,20 @@ def main():
         
         # Çekim tablosunu gizle/göster (yan menüde)
         st.sidebar.checkbox("Çekim Tablosunu Gizle", value=False, key="hide_withdrawals_table")
+
+        # Toplam bilgi uyarısını gizleme tercihi
+        hide_total_info_cb = st.checkbox("Toplam bilgi kutusunu gizle", value=config.get("hide_total_info", False))
+        if hide_total_info_cb != config.get("hide_total_info", False):
+            config["hide_total_info"] = hide_total_info_cb
+            save_config(config)
+
+        # Yükleme başarı mesajını gizleme tercihi
+        hide_success_cb = st.checkbox("Yükleme başarı mesajını gizle", value=config.get("hide_load_success", True))
+        if hide_success_cb != config.get("hide_load_success", True):
+            config["hide_load_success"] = hide_success_cb
+            save_config(config)
+        # Session state'e de yansıt (render koşulu için)
+        st.session_state['hide_load_success'] = hide_success_cb
     
     # Token kontrolü
     if not config.get("token", ""):
@@ -745,7 +773,8 @@ def main():
                     """)
             else:
                 st.session_state.withdrawal_data = result
-                st.success(f"✅ Veriler başarıyla yüklendi! Son güncelleme: {datetime.now().strftime('%H:%M:%S')}")
+                if not st.session_state.get('hide_load_success', config.get('hide_load_success', True)):
+                    st.success(f"✅ Veriler başarıyla yüklendi! Son güncelleme: {datetime.now().strftime('%H:%M:%S')}")
     
     # Otomatik yenileme sistemi (JavaScript tabanlı) — iframe yerine direkt script enjekte et (boşluk oluşmasın)
     if st.session_state.auto_refresh_enabled:
@@ -946,7 +975,8 @@ def main():
                 if changed and (set(current_selected_indices) != ({chosen} if chosen is not None else set())):
                     st.rerun()
 
-            st.info(f"📊 Toplam {len(df)} çekim talebi listelendi. Toplam tutar: {total_amount:,.2f} TL")
+            if not st.session_state.get('hide_total_info', config.get('hide_total_info', False)):
+                st.info(f"📊 Toplam {len(df)} çekim talebi listelendi. Toplam tutar: {total_amount:,.2f} TL")
             
             # --- Tablo altı alan: Seçilen uygulamalar bu konteyner içinde gösterilir ---
             under_table_pl = st.container()
