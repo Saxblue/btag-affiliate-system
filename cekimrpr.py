@@ -747,16 +747,18 @@ def main():
                 st.session_state.withdrawal_data = result
                 st.success(f"✅ Veriler başarıyla yüklendi! Son güncelleme: {datetime.now().strftime('%H:%M:%S')}")
     
-    # Otomatik yenileme sistemi (JavaScript tabanlı)
+    # Otomatik yenileme sistemi (JavaScript tabanlı) — iframe yerine direkt script enjekte et (boşluk oluşmasın)
     if st.session_state.auto_refresh_enabled:
-        # Auto-refresh için JavaScript timer
-        components.html(f"""
-        <script>
-        setTimeout(function(){{
-            window.parent.location.reload();
-        }}, {refresh_interval * 1000});
-        </script>
-        """, height=0)
+        st.markdown(
+            f"""
+            <script>
+            setTimeout(function() {{
+                window.location.reload();
+            }}, {refresh_interval * 1000});
+            </script>
+            """,
+            unsafe_allow_html=True,
+        )
         
         # Arka planda yeni talepleri kontrol et
         new_count = check_new_requests_background(config.get("token", ""))
