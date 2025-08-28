@@ -12,6 +12,7 @@ import urllib3
 import sys
 import threading
 import time
+import html
 
 # Uyarıları kapat
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -1154,6 +1155,29 @@ def main():
 
                                     fraud_text = "\n".join(report_lines)
                                     st.text_area("Fraud Raporu (kopyalanabilir)", value=fraud_text, height=300, key=f"fraud_ta_{client_id}")
+                                    components.html(f"""
+                                    <div style=\"margin: 6px 0 12px 0;\">
+                                      <textarea id=\"fraud_copy_src_{client_id}\" style=\"position:absolute;left:-9999px;top:-9999px;\">{html.escape(fraud_text)}</textarea>
+                                      <button id=\"fraud_copy_btn_{client_id}\"
+                                        style=\"padding:6px 10px;border-radius:6px;border:1px solid #1E88E5;background:#1E88E5;color:#fff;cursor:pointer;\">📋 Kopyala</button>
+                                      <span id=\"fraud_copy_status_{client_id}\" style=\"margin-left:8px;color:green;font-size:0.9rem;\"></span>
+                                      <script>
+                                        (function(){{
+                                          const btn = document.getElementById('fraud_copy_btn_{client_id}');
+                                          const stat = document.getElementById('fraud_copy_status_{client_id}');
+                                          const src = document.getElementById('fraud_copy_src_{client_id}');
+                                          if(btn && src){{
+                                            btn.addEventListener('click', function(){{
+                                              const txt = src.value || '';
+                                              navigator.clipboard.writeText(txt).then(function(){{
+                                                if(stat){{ stat.textContent = 'Kopyalandı'; setTimeout(function(){{ stat.textContent=''; }}, 1500); }}
+                                              }});
+                                            }});
+                                          }}
+                                        }})();
+                                      </script>
+                                    </div>
+                                    """, height=70)
                                     
                                     # Basit çekim raporu (BankTransferBME için)
                                     try:
@@ -1195,6 +1219,29 @@ def main():
                                             ]
                                             cekim_text = "\n".join(cekim_text_lines)
                                             st.text_area("Çekim Raporu (kopyalanabilir)", value=cekim_text, height=120, key=f"wd_ta_{client_id}")
+                                            components.html(f"""
+                                            <div style=\"margin: 6px 0 12px 0;\">
+                                              <textarea id=\"wd_copy_src_{client_id}\" style=\"position:absolute;left:-9999px;top:-9999px;\">{html.escape(cekim_text)}</textarea>
+                                              <button id=\"wd_copy_btn_{client_id}\"
+                                                style=\"padding:6px 10px;border-radius:6px;border:1px solid #1E88E5;background:#1E88E5;color:#fff;cursor:pointer;\">📋 Kopyala</button>
+                                              <span id=\"wd_copy_status_{client_id}\" style=\"margin-left:8px;color:green;font-size:0.9rem;\"></span>
+                                              <script>
+                                                (function(){{
+                                                  const btn = document.getElementById('wd_copy_btn_{client_id}');
+                                                  const stat = document.getElementById('wd_copy_status_{client_id}');
+                                                  const src = document.getElementById('wd_copy_src_{client_id}');
+                                                  if(btn && src){{
+                                                    btn.addEventListener('click', function(){{
+                                                      const txt = src.value || '';
+                                                      navigator.clipboard.writeText(txt).then(function(){{
+                                                        if(stat){{ stat.textContent = 'Kopyalandı'; setTimeout(function(){{ stat.textContent=''; }}, 1500); }}
+                                                      }});
+                                                    }});
+                                                  }}
+                                                }})();
+                                              </script>
+                                            </div>
+                                            """, height=70)
                                     except Exception:
                                         pass
                                         
